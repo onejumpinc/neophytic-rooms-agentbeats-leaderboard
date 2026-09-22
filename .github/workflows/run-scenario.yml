@@ -1,127 +1,583 @@
-name: Run Scenario
+name: Run exact Neophytic Rooms scenario
 
 on:
-  push:
-    paths:
-      - 'scenario.toml'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: neophytic-rooms-submission-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NEOPHYTIC_ROOMS_AGENT_ID: 'NEOPHYTIC_ROOMS_AGENT_ID'
+  GREEN_AGENT_ID: '019c17a8-ffcd-7192-95b6-6d486951a162'
+  GREEN_REGISTERED_IMAGE: 'ghcr.io/enspikondplus/neophytic-rooms-green:latest'
+  GREEN_IMAGE: 'ghcr.io/enspikondplus/neophytic-rooms-green@sha256:258a3123ff252ac1d1288a9e4043275da20bee48bce8142cbdadd47f21b8a695'
+  PARTICIPANT_IMAGE: 'ghcr.io/onejumpinc/neophytic-rooms-deterministic-agent@sha256:6938a4ceb7e7edbc898c8781613730fdada064f804b4fd82cfedce9c8cd9ada9'
+  PARTICIPANT_IMAGE_ID: 'sha256:b9e10ff30aa787ef26be8c67c8f1dfcabb7307a3b7cfc03afc946d0292b54e8c'
+  PARTICIPANT_MANIFEST_URL: 'https://raw.githubusercontent.com/onejumpinc/neophytic-rooms-deterministic-agent/c146108ebcc1266824a857110aeee50b77e7b4bf/amber-manifest.json5'
+  PARTICIPANT_MANIFEST_SHA256: '6cef1ccec1ea942aed8d52811c823ae70138e5c809f50b0763d60e9a1d3fc344'
+  CLIENT_IMAGE: 'ghcr.io/agentbeats/agentbeats-client@sha256:13dfe3ef4e583a80e7ce2fe3becd0ce3b879841368a7f4fa40b6ebbabeeb014e'
+  UPSTREAM_REPOSITORY: 'EnspikondPlusPlus/neophytic-rooms-leaderboard'
+  UPSTREAM_MAIN_SHA: 'd2fc2b6af31d1ae20672b0b73a244ce28183944c'
+  SUBMISSION_STEM: 'onejumpinc-neophytic-rooms-6938a4ceb7e7'
+  SUBMISSION_BRANCH: 'submission-onejumpinc-neophytic-rooms-6938a4ceb7e7'
+  COMPOSE_PROJECT_NAME: 'neophytic-rooms-public'
+  COMPOSE_FILE: 'docker-compose.yml'
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
-    if: github.event.repository.fork == true || github.ref != 'refs/heads/main'
+  evaluate:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.repository.fork == true &&
+      github.repository == 'onejumpinc/neophytic-rooms-agentbeats-leaderboard' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
-      contents: write
-      packages: read
+      contents: read
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install tomli tomli-w pyyaml requests
-
-      - name: Generate docker-compose.yml
-        run: python generate_compose.py --scenario scenario.toml
-
-      - name: Pull images
+      - name: Refuse placeholders, re-runs, and an existing submission branch
         run: |
-          if ! docker compose pull; then
-            echo ""
-            echo "Error: Failed to pull one or more images."
-            echo "Ensure all images are publicly accessible."
-            echo "For ghcr.io images, check package settings at:"
-            echo "  https://github.com/orgs/YOUR_ORG/packages or"
-            echo "  https://github.com/users/YOUR_USER/packages"
+          test "$GITHUB_RUN_ATTEMPT" = '1'
+          python - <<'PY'
+          import os
+          import re
+
+          agent_id = os.environ["NEOPHYTIC_ROOMS_AGENT_ID"]
+          pattern = (
+              r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-"
+              r"[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+          )
+          if not re.fullmatch(pattern, agent_id):
+              raise SystemExit(
+                  "Gate failed: NEOPHYTIC_ROOMS_AGENT_ID is not a "
+                  f"canonical v7 UUID: {agent_id!r}"
+              )
+          PY
+          if git ls-remote --exit-code --heads \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/heads/$SUBMISSION_BRANCH" >/dev/null 2>&1; then
+            echo "Gate failed: submission branch already exists: $SUBMISSION_BRANCH" >&2
             exit 1
           fi
 
-      - name: Create output directory
-        run: mkdir -p output && chmod 777 output
-
-      - name: Export secrets as environment variables
-        env:
-          SECRETS_JSON: ${{ toJSON(secrets) }}
-        run: |
-          echo "$SECRETS_JSON" | jq -r 'to_entries|map("\(.key)=\(.value)")|.[]' > .env
-
-      - name: Check if GHCR_TOKEN is available
-        id: check_ghcr
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-        run: |
-          if [ -n "$GHCR_TOKEN" ]; then
-            echo "has_token=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_token=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Login to GitHub Container Registry
-        if: steps.check_ghcr.outputs.has_token == 'true'
-        uses: docker/login-action@v3
+      - name: Checkout hardened fork
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          persist-credentials: false
 
-      - name: Run assessment
-        run: docker compose up --timestamps --no-color --exit-code-from agentbeats-client --abort-on-container-exit
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
 
-      - name: Record provenance
-        run: python record_provenance.py --compose docker-compose.yml --output output/provenance.json
-
-      - name: Generate submission metadata
-        id: metadata
+      - name: Verify scenario, registrations, and release manifest
         run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          USERNAME=${{ github.repository_owner }}
-          UNIQUE_NAME="${USERNAME}-${TIMESTAMP}"
-          echo "unique_name=$UNIQUE_NAME" >> $GITHUB_OUTPUT
-          echo "branch_name=submission-${UNIQUE_NAME}" >> $GITHUB_OUTPUT
+          cmp scenario.toml scenario.ci.toml
+          test ! -e .env
+          test ! -e .env.example
+          test ! -e compose.yaml
+          test ! -e compose.yml
+          test ! -e docker-compose.override.yml
+          test ! -e docker-compose.override.yaml
+          python - <<'PY'
+          import json
+          import os
+          import tomllib
+          import urllib.request
 
-      - name: Copy files to submission directory
+
+          def fail(message):
+              raise SystemExit(f"Gate failed: {message}")
+
+
+          with open("scenario.toml", "rb") as source:
+              scenario = tomllib.load(source)
+          expected_config = {
+              "generate": True,
+              "count": 5,
+              "difficulty": "tutorial",
+              "no_loops": True,
+              "steps_remaining": 30,
+              "obs_inspect_weight": 3.0,
+              "failure_show": True,
+              "failure_consequence": 0.0,
+              "commit_reset": True,
+          }
+          expected = {
+              "green_agent": {
+                  "agentbeats_id": os.environ["GREEN_AGENT_ID"],
+                  "env": {"LOG_LEVEL": "INFO"},
+              },
+              "participants": [
+                  {
+                      "name": "solver",
+                      "agentbeats_id": os.environ["NEOPHYTIC_ROOMS_AGENT_ID"],
+                      "env": {},
+                  }
+              ],
+              "config": expected_config,
+          }
+          if scenario != expected:
+              fail(f"scenario.toml mismatch: {scenario!r}")
+          expected_types = {
+              "generate": bool,
+              "count": int,
+              "difficulty": str,
+              "no_loops": bool,
+              "steps_remaining": int,
+              "obs_inspect_weight": float,
+              "failure_show": bool,
+              "failure_consequence": float,
+              "commit_reset": bool,
+          }
+          for key, expected_type in expected_types.items():
+              if type(scenario["config"][key]) is not expected_type:
+                  fail(f"config.{key} has the wrong type")
+
+          def get_agent(agent_id):
+              request = urllib.request.Request(
+                  f"https://agentbeats.dev/api/agents/{agent_id}",
+                  headers={
+                      "User-Agent": (
+                          "onejumpinc-neophytic-rooms-leaderboard/1.0 "
+                          "(+https://github.com/onejumpinc/"
+                          "neophytic-rooms-agentbeats-leaderboard)"
+                      )
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          green = get_agent(os.environ["GREEN_AGENT_ID"])
+          expected_green = {
+              "id": os.environ["GREEN_AGENT_ID"],
+              "creator_name": "EnspikondPlus",
+              "color": "green",
+              "category_slug": "game",
+              "repo_link": "https://github.com/EnspikondPlus/neophytic-rooms-green",
+              "docker_image": os.environ["GREEN_REGISTERED_IMAGE"],
+              "amber_manifest_url": None,
+              "ai_models": [],
+          }
+          for key, expected_value in expected_green.items():
+              actual = green.get(key)
+              if isinstance(actual, str) and key == "repo_link":
+                  actual = actual.rstrip("/")
+              if actual != expected_value:
+                  fail(f"green registration {key}={actual!r}")
+
+          participant = get_agent(os.environ["NEOPHYTIC_ROOMS_AGENT_ID"])
+          expected_participant = {
+              "id": os.environ["NEOPHYTIC_ROOMS_AGENT_ID"],
+              "creator_name": "onejumpinc",
+              "color": "purple",
+              "category_slug": "game",
+              "repo_link": (
+                  "https://github.com/onejumpinc/"
+                  "neophytic-rooms-deterministic-agent"
+              ),
+              "docker_image": os.environ["PARTICIPANT_IMAGE"],
+              "amber_manifest_url": os.environ["PARTICIPANT_MANIFEST_URL"],
+              "ai_models": [],
+          }
+          for key, expected_value in expected_participant.items():
+              actual = participant.get(key)
+              if isinstance(actual, str) and key == "repo_link":
+                  actual = actual.rstrip("/")
+              if actual != expected_value:
+                  fail(f"participant registration {key}={actual!r}")
+          print("Exact scenario and AgentBeats registrations verified")
+          PY
+
+          manifest_path="$RUNNER_TEMP/neophytic-rooms-participant-manifest.json5"
+          curl --fail --silent --show-error --location \
+            --output "$manifest_path" "$PARTICIPANT_MANIFEST_URL"
+          printf '%s  %s\n' "$PARTICIPANT_MANIFEST_SHA256" "$manifest_path" \
+            | sha256sum --check --strict
+          test "$(grep -Fxc "    image: \"$PARTICIPANT_IMAGE\"," "$manifest_path")" = '1'
+
+      - name: Install pinned runner dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          tomli-w==1.2.0 pyyaml==6.0.3 requests==2.34.2
+
+      - name: Generate and verify exact runtime topology
         run: |
-          cp scenario.toml submissions/${{ steps.metadata.outputs.unique_name }}.toml
-          cp output/results.json results/${{ steps.metadata.outputs.unique_name }}.json
-          cp output/provenance.json submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json
+          python generate_compose.py --scenario scenario.toml
+          test ! -e .env
+          test ! -e .env.example
+          python - <<'PY'
+          import copy
+          import os
+          import tomllib
 
-      - name: Determine target repository
-        id: target
-        env:
-            GH_TOKEN: ${{ github.token }}
+          import yaml
+
+
+          def fail(message):
+              raise SystemExit(f"Gate failed: {message}")
+
+
+          with open("a2a-scenario.toml", "rb") as source:
+              a2a = tomllib.load(source)
+          expected_config = {
+              "generate": True,
+              "count": 5,
+              "difficulty": "tutorial",
+              "no_loops": True,
+              "steps_remaining": 30,
+              "obs_inspect_weight": 3.0,
+              "failure_show": True,
+              "failure_consequence": 0.0,
+              "commit_reset": True,
+          }
+          expected_a2a = {
+              "green_agent": {"endpoint": "http://green-agent:9009"},
+              "participants": [
+                  {
+                      "role": "solver",
+                      "endpoint": "http://solver:9009",
+                      "agentbeats_id": os.environ["NEOPHYTIC_ROOMS_AGENT_ID"],
+                  }
+              ],
+              "config": expected_config,
+          }
+          if a2a != expected_a2a:
+              fail(f"a2a-scenario.toml mismatch: {a2a!r}")
+          expected_a2a_text = (
+              '[green_agent]\n'
+              'endpoint = "http://green-agent:9009"\n\n'
+              '[[participants]]\n'
+              'role = "solver"\n'
+              'endpoint = "http://solver:9009"\n'
+              f'agentbeats_id = "{os.environ["NEOPHYTIC_ROOMS_AGENT_ID"]}"\n\n'
+              '[config]\n'
+              'generate = true\n'
+              'count = 5\n'
+              'difficulty = "tutorial"\n'
+              'no_loops = true\n'
+              'steps_remaining = 30\n'
+              'obs_inspect_weight = 3.0\n'
+              'failure_show = true\n'
+              'failure_consequence = 0.0\n'
+              'commit_reset = true\n'
+          )
+          if open("a2a-scenario.toml", encoding="utf-8").read() != expected_a2a_text:
+              fail("a2a-scenario.toml byte rendering mismatch")
+
+          curl_healthcheck = {
+              "test": [
+                  "CMD",
+                  "curl",
+                  "-f",
+                  "http://localhost:9009/.well-known/agent-card.json",
+              ],
+              "interval": "5s",
+              "timeout": "3s",
+              "retries": 10,
+              "start_period": "30s",
+          }
+          command = ["--host", "0.0.0.0", "--port", "9009", "--card-url"]
+          generated_compose = {
+              "services": {
+                  "green-agent": {
+                      "image": os.environ["GREEN_IMAGE"],
+                      "platform": "linux/amd64",
+                      "container_name": "green-agent",
+                      "command": command + ["http://green-agent:9009"],
+                      "environment": ["PYTHONUNBUFFERED=1", "LOG_LEVEL=INFO"],
+                      "healthcheck": curl_healthcheck,
+                      "depends_on": {"solver": {"condition": "service_healthy"}},
+                      "networks": ["agent-network"],
+                  },
+                  "solver": {
+                      "image": os.environ["PARTICIPANT_IMAGE"],
+                      "platform": "linux/amd64",
+                      "container_name": "solver",
+                      "command": command + ["http://solver:9009"],
+                      "environment": ["PYTHONUNBUFFERED=1"],
+                      "healthcheck": curl_healthcheck,
+                      "networks": ["agent-network"],
+                  },
+                  "agentbeats-client": {
+                      "image": "ghcr.io/agentbeats/agentbeats-client:v1.0.0",
+                      "platform": "linux/amd64",
+                      "container_name": "agentbeats-client",
+                      "volumes": [
+                          "./a2a-scenario.toml:/app/scenario.toml",
+                          "./output:/app/output",
+                      ],
+                      "command": ["scenario.toml", "output/results.json"],
+                      "depends_on": {
+                          "green-agent": {"condition": "service_healthy"},
+                          "solver": {"condition": "service_healthy"},
+                      },
+                      "networks": ["agent-network"],
+                  },
+              },
+              "networks": {"agent-network": {"driver": "bridge"}},
+          }
+          with open("docker-compose.yml", encoding="utf-8") as source:
+              compose = yaml.safe_load(source)
+          if compose != generated_compose:
+              fail(f"generated Compose mismatch: {compose!r}")
+
+          python_healthcheck = {
+              "test": [
+                  "CMD",
+                  "python",
+                  "-c",
+                  "import urllib.request; "
+                  "urllib.request.urlopen('http://127.0.0.1:9009/"
+                  ".well-known/agent-card.json', timeout=2)",
+              ],
+              "interval": "5s",
+              "timeout": "3s",
+              "retries": 10,
+              "start_period": "30s",
+          }
+          expected_runtime = copy.deepcopy(generated_compose)
+          compose["services"]["green-agent"]["healthcheck"] = python_healthcheck
+          compose["services"]["solver"]["healthcheck"] = python_healthcheck
+          compose["services"]["agentbeats-client"]["image"] = os.environ["CLIENT_IMAGE"]
+          compose["services"]["agentbeats-client"]["command"] = [
+              "/app/scenario.toml",
+              "/app/output/results.json",
+          ]
+          expected_runtime["services"]["green-agent"]["healthcheck"] = python_healthcheck
+          expected_runtime["services"]["solver"]["healthcheck"] = python_healthcheck
+          expected_runtime["services"]["agentbeats-client"]["image"] = os.environ[
+              "CLIENT_IMAGE"
+          ]
+          expected_runtime["services"]["agentbeats-client"]["command"] = [
+              "/app/scenario.toml",
+              "/app/output/results.json",
+          ]
+          if compose != expected_runtime:
+              fail("hardened runtime topology mismatch")
+          with open("docker-compose.yml", "w", encoding="utf-8") as output:
+              yaml.safe_dump(compose, output, sort_keys=False)
+          PY
+
+          docker compose \
+            --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$COMPOSE_FILE" config --quiet
+
+      - name: Pull and verify immutable public images
         run: |
-            PARENT_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')
-            echo "Target repository: $PARENT_REPO"
-            echo "repo=$PARENT_REPO" >> $GITHUB_OUTPUT
+          install -d -m 0777 output
+          docker version > output/docker-version.txt
+          docker info > output/docker-info.txt
 
-      - name: Create submission branch
+          docker pull "$GREEN_REGISTERED_IMAGE"
+          registered_green_id=$(docker image inspect "$GREEN_REGISTERED_IMAGE" --format '{{.Id}}')
+          registered_green_digests=$(docker image inspect "$GREEN_REGISTERED_IMAGE" --format '{{json .RepoDigests}}')
+          jq -e --arg expected "$GREEN_IMAGE" \
+            'index($expected) != null' <<<"$registered_green_digests" >/dev/null
+
+          docker compose \
+            --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$COMPOSE_FILE" pull
+
+          pinned_green_id=$(docker image inspect "$GREEN_IMAGE" --format '{{.Id}}')
+          test "$pinned_green_id" = "$registered_green_id"
+          participant_id=$(docker image inspect "$PARTICIPANT_IMAGE" --format '{{.Id}}')
+          test "$participant_id" = "$PARTICIPANT_IMAGE_ID"
+          for image in "$GREEN_IMAGE" "$PARTICIPANT_IMAGE" "$CLIENT_IMAGE"; do
+            digests=$(docker image inspect "$image" --format '{{json .RepoDigests}}')
+            jq -e --arg expected "$image" \
+              'index($expected) != null' <<<"$digests" >/dev/null
+          done
+
+      - name: Run the exact five-system public assessment
+        run: >-
+          docker compose
+          --project-name "$COMPOSE_PROJECT_NAME"
+          --file "$COMPOSE_FILE"
+          up --pull never --no-build --timestamps --no-color
+          --exit-code-from agentbeats-client --abort-on-container-exit
+
+      - name: Capture container logs
+        if: always()
         run: |
-          git remote add upstream https://github.com/${{ steps.target.outputs.repo }}.git
-          git fetch upstream
-          git checkout -b ${{ steps.metadata.outputs.branch_name }} upstream/main
+          mkdir -p output
+          docker logs green-agent > output/green.log 2>&1 || true
+          docker logs solver > output/participant.log 2>&1 || true
+          docker logs agentbeats-client > output/client.log 2>&1 || true
 
-      - name: Commit results
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add submissions/${{ steps.metadata.outputs.unique_name }}.toml submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json results/${{ steps.metadata.outputs.unique_name }}.json
-          git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}
+      - name: Record immutable provenance
+        run: >-
+          python record_provenance.py
+          --compose docker-compose.yml
+          --output output/provenance.json
 
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          git push origin ${{ steps.metadata.outputs.branch_name }}
-          echo "::notice title=Submission Branch Created::Your results are ready for submission on branch: ${{ steps.metadata.outputs.branch_name }}"
+      - name: Verify exact live score, histories, logs, and provenance
+        run: >-
+          python verify_exact_result.py
+          --results output/results.json
+          --provenance output/provenance.json
+          --green-log output/green.log
+          --participant-log output/participant.log
+          --client-log output/client.log
 
-      - name: Output PR link
-        run: |
-          echo "### Submit your results" >> $GITHUB_STEP_SUMMARY
-          echo "[Click here to open a pull request](https://github.com/${{ steps.target.outputs.repo }}/compare/main...${{ github.repository_owner }}:${{ github.event.repository.name }}:${{ steps.metadata.outputs.branch_name }}?expand=1)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "⚠️ When creating the PR, UNCHECK 'Allow edits and access to secrets by maintainers' to protect your secrets." >> $GITHUB_STEP_SUMMARY
+      - name: Preserve public-run evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: neophytic-rooms-public-run-${{ github.run_id }}
+          path: |
+            output/results.json
+            output/provenance.json
+            output/green.log
+            output/participant.log
+            output/client.log
+            output/docker-version.txt
+            output/docker-info.txt
+            scenario.toml
+            scenario.ci.toml
+            a2a-scenario.toml
+            docker-compose.yml
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Cleanup
         if: always()
-        run: docker compose down -v || true
+        run: >-
+          docker compose
+          --project-name "$COMPOSE_PROJECT_NAME"
+          --file "$COMPOSE_FILE"
+          down --volumes || true
+
+  stage-submission:
+    needs: evaluate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.repository.fork == true &&
+      github.repository == 'onejumpinc/neophytic-rooms-agentbeats-leaderboard' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout hardened fork without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Download exact-gated evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: neophytic-rooms-public-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/neophytic-rooms-evidence
+
+      - name: Re-verify downloaded score and provenance
+        run: |
+          test "$GITHUB_RUN_ATTEMPT" = '1'
+          evidence="$RUNNER_TEMP/neophytic-rooms-evidence"
+          cmp scenario.toml "$evidence/scenario.toml"
+          cmp scenario.ci.toml "$evidence/scenario.ci.toml"
+          cmp "$evidence/scenario.toml" "$evidence/scenario.ci.toml"
+          python verify_exact_result.py \
+            --results "$evidence/output/results.json" \
+            --provenance "$evidence/output/provenance.json" \
+            --green-log "$evidence/output/green.log" \
+            --participant-log "$evidence/output/participant.log" \
+            --client-log "$evidence/output/client.log"
+
+      - name: Build an exact three-file submission branch
+        run: |
+          if git ls-remote --exit-code --heads origin \
+            "refs/heads/$SUBMISSION_BRANCH" >/dev/null 2>&1; then
+            echo "Gate failed: submission branch already exists: $SUBMISSION_BRANCH" >&2
+            exit 1
+          fi
+
+          git remote add submission-upstream "https://github.com/$UPSTREAM_REPOSITORY.git"
+          git fetch --no-tags submission-upstream main
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_MAIN_SHA"
+          git checkout --detach "$UPSTREAM_MAIN_SHA"
+          git switch --create "$SUBMISSION_BRANCH"
+
+          evidence="$RUNNER_TEMP/neophytic-rooms-evidence"
+          result_path="results/$SUBMISSION_STEM.json"
+          scenario_path="submissions/$SUBMISSION_STEM.toml"
+          provenance_path="submissions/$SUBMISSION_STEM.provenance.json"
+          test ! -e "$result_path"
+          test ! -e "$scenario_path"
+          test ! -e "$provenance_path"
+          cp "$evidence/output/results.json" "$result_path"
+          cp "$evidence/scenario.toml" "$scenario_path"
+          cp "$evidence/output/provenance.json" "$provenance_path"
+          cmp "$evidence/output/results.json" "$result_path"
+          cmp "$evidence/scenario.toml" "$scenario_path"
+          cmp "$evidence/output/provenance.json" "$provenance_path"
+          git add "$result_path" "$scenario_path" "$provenance_path"
+          git diff --cached --check
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          stem = os.environ["SUBMISSION_STEM"]
+          actual = subprocess.check_output(
+              ["git", "diff", "--cached", "--name-status"],
+              text=True,
+          ).splitlines()
+          expected = [
+              f"A\tresults/{stem}.json",
+              f"A\tsubmissions/{stem}.provenance.json",
+              f"A\tsubmissions/{stem}.toml",
+          ]
+          if actual != expected:
+              raise SystemExit(
+                  f"Gate failed: staged submission delta={actual!r}, "
+                  f"expected={expected!r}"
+              )
+          PY
+
+          {
+            echo "result_path=$result_path"
+            echo "scenario_path=$scenario_path"
+            echo "provenance_path=$provenance_path"
+          } >> "$GITHUB_ENV"
+
+      - name: Commit and push exact-gated results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git commit -m "Submission: $SUBMISSION_STEM
+
+          Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push origin "$SUBMISSION_BRANCH"
+          echo "::notice title=Submission Branch Created::$SUBMISSION_BRANCH"
+
+      - name: Output pull request link
+        run: |
+          {
+            echo '### Submit exact-gated Neophytic Rooms results'
+            echo "[Open a pull request](https://github.com/$UPSTREAM_REPOSITORY/compare/main...onejumpinc:neophytic-rooms-agentbeats-leaderboard:$SUBMISSION_BRANCH?expand=1)"
+            echo ''
+            echo 'No pull request was opened or merged automatically.'
+          } >> "$GITHUB_STEP_SUMMARY"

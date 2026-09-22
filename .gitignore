@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.pyc
 docker-compose.yml
 a2a-scenario.toml
 .env

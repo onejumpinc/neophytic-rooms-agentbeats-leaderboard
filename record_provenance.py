@@ -16,9 +16,9 @@ except ImportError:
 
 
 def get_image_digest(image: str) -> str:
-    """Get the RepoDigest for a docker image pulled from a registry."""
+    """Require the requested immutable reference in the pulled RepoDigests."""
     result = subprocess.run(
-        ["docker", "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
+        ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
         capture_output=True,
         text=True,
     )
@@ -26,12 +26,20 @@ def get_image_digest(image: str) -> str:
         print(f"Error: Failed to inspect image '{image}': {result.stderr.strip()}")
         sys.exit(1)
 
-    digest = result.stdout.strip()
-    if not digest:
-        print(f"Error: No registry digest found for image '{image}'")
+    try:
+        digests = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        print(f"Error: Invalid RepoDigests for image '{image}': {exc}")
         sys.exit(1)
 
-    return digest
+    if image not in (digests or []):
+        print(
+            f"Error: Requested digest '{image}' is absent from RepoDigests: "
+            f"{digests!r}"
+        )
+        sys.exit(1)
+
+    return image
 
 
 def parse_compose(compose_path: Path) -> dict:

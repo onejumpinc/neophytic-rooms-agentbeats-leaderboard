@@ -115,8 +115,15 @@ endpoint = "http://green-agent:{green_port}"
 {config}"""
 
 
-def resolve_image(agent: dict, name: str) -> None:
-    """Resolve docker image for an agent, either from 'image' field or agentbeats API."""
+def resolve_image(agent: dict, name: str, env_override_key: str | None = None) -> None:
+    """Resolve an image from a pinned override, config, or AgentBeats."""
+    if env_override_key:
+        env_image = os.environ.get(env_override_key)
+        if env_image:
+            agent["image"] = env_image
+            print(f"Using {name} image from {env_override_key}: {env_image}")
+            return
+
     has_image = "image" in agent
     has_id = "agentbeats_id" in agent
 
@@ -142,7 +149,7 @@ def parse_scenario(scenario_path: Path) -> dict[str, Any]:
     data = tomli.loads(toml_data)
 
     green = data.get("green_agent", {})
-    resolve_image(green, "green_agent")
+    resolve_image(green, "green_agent", env_override_key="GREEN_IMAGE")
 
     participants = data.get("participants", [])
 
@@ -156,7 +163,12 @@ def parse_scenario(scenario_path: Path) -> dict[str, Any]:
 
     for participant in participants:
         name = participant.get("name", "unknown")
-        resolve_image(participant, f"participant '{name}'")
+        override = "PARTICIPANT_IMAGE" if name == "solver" else None
+        resolve_image(
+            participant,
+            f"participant '{name}'",
+            env_override_key=override,
+        )
 
     return data
 
